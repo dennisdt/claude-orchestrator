@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# claude-revive — auto-respawning Claude Code wrapper.
+#
+# Starts fresh OR resumes, depending on whether a prior conversation exists
+# for the current directory (detected via ~/.claude/projects/<encoded-cwd>).
+# This matters when a tmux window is freshly spawned for a project that
+# already has a Claude history on disk — we want --continue from the very
+# first launch, not from the second.
+#
+# On any exit, respawns with --continue so in-conversation history is
+# preserved. Press Ctrl+C during the 5s grace window to stop the loop.
+
+set -u
+
+FLAGS=(--dangerously-skip-permissions --remote-control)
+
+# Claude encodes project dirs by replacing / with - (so /Users/foo becomes
+# -Users-foo under ~/.claude/projects). If that directory has any .jsonl
+# transcripts, there's a prior session to resume.
+encoded_cwd="$(pwd | sed 's|/|-|g')"
+project_dir="$HOME/.claude/projects/$encoded_cwd"
+shopt -s nullglob
+jsonls=("$project_dir"/*.jsonl)
+shopt -u nullglob
+
+if [[ ${#jsonls[@]} -gt 0 ]]; then
+  echo "[claude-revive] Found prior history for $(pwd) — resuming with --continue."
+  first=0
+else
+  echo "[claude-revive] No prior history for $(pwd) — starting fresh."
+  first=1
+fi
+
+trap 'echo ""; echo "[claude-revive] Loop stopped."; exit 0' INT TERM
+
+while true; do
+  if [[ "$first" -eq 1 ]]; then
+    claude "${FLAGS[@]}"
+    first=0
+  else
+    claude "${FLAGS[@]}" --continue
+  fi
+
+  status=$?
+  echo ""
+  echo "[claude-revive] Claude exited (status $status) at $(date)."
+  echo "[claude-revive] Restarting in 5s. Ctrl+C to stop the loop."
+  sleep 5 || break
+done

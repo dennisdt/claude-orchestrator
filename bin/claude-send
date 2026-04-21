@@ -1,0 +1,43 @@
+#!/bin/bash
+# claude-send — send text (or a slash command) to a named orchestrator window.
+#
+# Usage:
+#   claude-send <window> <text...>
+#
+# Sends <text> followed by Enter to the tmux window named <window> in the
+# "work" session. Useful for scripting external triggers — cron jobs, CI,
+# or other tools that want to nudge a running Claude session:
+#
+#   claude-send example-api /compact
+#   claude-send orchestrator 'start a session for my example-ui repo'
+
+set -eu
+
+if [[ $# -lt 2 ]]; then
+  cat >&2 <<EOF
+Usage: claude-send <window> <text...>
+
+Examples:
+  claude-send example-api /compact
+  claude-send orchestrator 'start a session for my example-ui repo'
+EOF
+  exit 2
+fi
+
+WINDOW="$1"
+shift
+TEXT="$*"
+
+if ! tmux has-session -t work 2>/dev/null; then
+  echo "claude-send: tmux session 'work' is not running." >&2
+  exit 1
+fi
+
+if ! tmux list-windows -t work -F '#{window_name}' | grep -qx "$WINDOW"; then
+  echo "claude-send: window 'work:$WINDOW' not found." >&2
+  echo "Available:" >&2
+  tmux list-windows -t work -F '  #{window_name}' >&2
+  exit 1
+fi
+
+tmux send-keys -t "work:$WINDOW" "$TEXT" Enter

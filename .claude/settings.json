@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(tmux new-session:*)",
+      "Bash(tmux new-window:*)",
+      "Bash(tmux send-keys:*)",
+      "Bash(tmux list-windows:*)",
+      "Bash(tmux list-sessions:*)",
+      "Bash(tmux has-session:*)",
+      "Bash(tmux kill-window:*)",
+      "Bash(tmux kill-session:*)",
+      "Bash(tmux select-window:*)",
+      "Bash(tmux attach:*)"
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+# Minimum config needed for claude-orchestrator on macOS.
+# Merge this into your existing ~/.tmux.conf (or copy it verbatim if you have none).
+#
+# Bridges tmux child processes back to your Aqua login session so macOS
+# Keychain lookups succeed — fixes the Claude Code "/login" re-auth loop
+# inside tmux. See scripts/install.sh for an automated installer.
+
+set-option -g default-command "reattach-to-user-namespace -l ${SHELL}"

@@ -1,0 +1,86 @@
+#!/bin/bash
+# claude-state — tiny session-state tracker for claude-orchestrator.
+#
+# Maintains a TSV at ~/.claude-orchestrator/sessions.txt with one
+# <name><TAB><path> line per project window the orchestrator has spawned.
+# Lets the orchestrator restore project windows after a reboot or
+# tmux kill-server.
+#
+# Usage:
+#   claude-state add <name> <path>    Record a spawned session (upsert)
+#   claude-state remove <name>        Remove a killed session
+#   claude-state list                 Print all recorded sessions
+#   claude-state missing              Print sessions in state but NOT in tmux
+#
+# The "work" tmux session and the orchestrator window are intentionally
+# untracked — only project windows belong in state.
+
+set -eu
+
+STATE_DIR="$HOME/.claude-orchestrator"
+STATE_FILE="$STATE_DIR/sessions.txt"
+
+mkdir -p "$STATE_DIR"
+touch "$STATE_FILE"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  claude-state add <name> <path>    Record a spawned session (upsert)
+  claude-state remove <name>        Remove a killed session
+  claude-state list                 Print all recorded sessions
+  claude-state missing              Print sessions in state but NOT in tmux
+EOF
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  add)
+    if [[ $# -lt 3 ]]; then
+      echo "usage: claude-state add <name> <path>" >&2
+      exit 2
+    fi
+    name="$2"
+    path="$3"
+    tmp="$(mktemp)"
+    awk -v n="$name" -F'\t' '$1 != n' "$STATE_FILE" > "$tmp"
+    printf '%s\t%s\n' "$name" "$path" >> "$tmp"
+    mv "$tmp" "$STATE_FILE"
+    ;;
+  remove|rm)
+    if [[ $# -lt 2 ]]; then
+      echo "usage: claude-state remove <name>" >&2
+      exit 2
+    fi
+    name="$2"
+    tmp="$(mktemp)"
+    awk -v n="$name" -F'\t' '$1 != n' "$STATE_FILE" > "$tmp"
+    mv "$tmp" "$STATE_FILE"
+    ;;
+  list|ls)
+    cat "$STATE_FILE"
+    ;;
+  missing)
+    if ! tmux has-session -t work 2>/dev/null; then
+      # No work session — everything in state counts as missing.
+      cat "$STATE_FILE"
+      exit 0
+    fi
+    live="$(tmux list-windows -t work -F '#{window_name}' | sort -u)"
+    while IFS=$'\t' read -r name path; do
+      [[ -z "$name" ]] && continue
+      if ! printf '%s\n' "$live" | grep -qx "$name"; then
+        printf '%s\t%s\n' "$name" "$path"
+      fi
+    done < "$STATE_FILE"
+    ;;
+  ""|-h|--help)
+    usage
+    ;;
+  *)
+    echo "claude-state: unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
