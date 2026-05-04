@@ -16,7 +16,7 @@ $CLAUDE_ORCHESTRATOR_HOME/bin/claude-state add <short-name> <directory>
 
 The `claude-state add` call records the session in `~/.claude-orchestrator/sessions.txt` so it can be restored after a reboot.
 
-Known limitation: if `--continue` hits a very large context, Claude prompts "Resume from summary / Resume full" — the wrapper can't click through that automatically.
+Relay drops (websocket dies but `claude` stays alive) are handled by `claude-rc-watchdog`, a separate LaunchAgent that polls panes and SIGTERMs `claude` when the `Remote Control active` footer disappears, letting `claude-revive` respawn with `--continue`. The watchdog also auto-dismisses the "Resume from summary / Resume full" modal that `--continue` may land on, so panes don't blackhole on the modal after a SIGTERM.
 
 ## How to list running sessions
 

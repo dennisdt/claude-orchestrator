@@ -6,7 +6,7 @@ A tmux-based harness for running multiple persistent Claude Code sessions from o
 
 - `CLAUDE.md` — the orchestrator's system prompt. Loaded automatically when you run `claude` from this directory.
 - `bin/claude-revive` — a bash respawn loop around `claude --dangerously-skip-permissions --remote-control`. On any exit it restarts with `--continue` so history is preserved. If the cwd already has prior Claude history on disk, it resumes from the very first launch (not just on respawn). Ctrl+C during the 5-second grace window stops the loop.
-- `bin/claude-rc-watchdog` — external watchdog for relay drops. Polls every pane in a tmux session (default `work`), finds claude's status footer (the unique `Model: <provider> <ver> ... | Ctx: <value>` line, NBSP-tolerant), and when the `Remote Control active` indicator is missing for `THRESHOLD` consecutive checks it SIGTERMs claude on that pane's tty — `claude-revive` then respawns with `--continue`, re-registering with the relay. Tunable via `CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE}` env vars; supports `--dry-run` and `--once` for testing. Designed to run as a LaunchAgent (`com.claude-rc-watchdog`) so it survives logout and tmux server restarts.
+- `bin/claude-rc-watchdog` — external watchdog for relay drops. Polls every pane in a tmux session (default `work`), finds claude's status footer (the unique `Model: <provider> <ver> ... | Ctx: <value>` line, NBSP-tolerant), and when the `Remote Control active` indicator is missing for `THRESHOLD` consecutive checks it SIGTERMs claude on that pane's tty — `claude-revive` then respawns with `--continue`, re-registering with the relay. Also auto-dismisses the "Resume from summary" modal that `--continue` shows on large-context resumes (sends synthetic `Enter` via tmux when the modal is the last visible line and no footer is rendered) so panes don't blackhole on the modal after a SIGTERM. Tunable via `CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE}` env vars; supports `--dry-run` and `--once` for testing. Designed to run as a LaunchAgent (`com.claude-rc-watchdog`) so it survives logout and tmux server restarts.
 - `bin/claude-send` — sends text or a slash command to a named orchestrator window. For cron/CI/external-tool triggers, e.g. `claude-send example-api /compact`. Inside the orchestrator you'd just ask it in English — this helper exists for non-Claude callers.
 - `bin/claude-state` — TSV-based session tracker at `~/.claude-orchestrator/sessions.txt`. The orchestrator calls `claude-state add` after spawning, `claude-state remove` after killing, and `claude-state missing` on startup to detect sessions that should be restored after a reboot.
 - `scripts/start-work.sh` — creates (or attaches to) a tmux session named `work`, with an orchestrator Claude running in this directory under `claude-revive`. Accepts `--no-attach` for headless use (the LaunchAgent calls it this way).
@@ -100,10 +100,6 @@ scripts/install-launchd.sh --uninstall
 Claude Code writes every conversation to `~/.claude/projects/<encoded-cwd>/*.jsonl` on every turn, so per-project histories survive any reboot, crash, or `tmux kill-server`. What doesn't survive is the tmux windows themselves — they need to be respawned.
 
 `claude-orchestrator` tracks spawned windows in `~/.claude-orchestrator/sessions.txt` (TSV: `<name>\t<path>`). After a reboot, `scripts/start-work.sh` (or the LaunchAgent) recreates only the orchestrator window. On your first message, the orchestrator runs `claude-state missing`, sees which project sessions aren't back yet, and asks whether to respawn them. Say yes and each comes back with `--continue` and its full prior history; say no and the entries are dropped from state.
-
-## Known limitation
-
-If `--continue` lands in a very large context, Claude shows a "Resume from summary / Resume full" prompt. The wrapper can't click through that — you have to do it manually the next time you attach.
 
 ## Layout
 
