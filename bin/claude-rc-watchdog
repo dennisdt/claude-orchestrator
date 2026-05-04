@@ -75,12 +75,40 @@ miss_set()  { local k; k=$(miss_key "$1"); printf -v "$k" '%s' "$2"; }
 
 check_pane() {
   local pane="$1"
-  # Capture the visible pane (no scrollback) and find the LAST line that
-  # matches claude's status footer. claude renders Model and the
-  # "Remote Control active" indicator on the SAME line, so we only need
-  # to check whether that line carries the RC token. Anchoring to the
-  # footer line means scrollback content that mentions RC can't create
-  # a false-positive.
+  local pane_buf
+  pane_buf=$(tmux capture-pane -p -t "$pane" 2>/dev/null) || return 0
+
+  # Resume-from-summary modal: if claude-revive's --continue lands in a
+  # large context, claude blocks on a "1. Resume from summary | 2. Resume
+  # full | 3. Don't ask me again" prompt that the wrapper itself can't
+  # dismiss. Without intervention, claude never renders its UI, never
+  # re-registers with the relay, and the next watchdog cycle just sees
+  # "UI not rendering" and stays silent — leaving the session blackholed.
+  #
+  # Detection has to be position-aware: "Resume from summary" can land
+  # in scrollback (claude quoting the modal text in its own responses),
+  # so anchor to the BOTTOM of the pane. When the modal is live, the
+  # last non-empty visible line is "Enter to confirm · Esc to cancel"
+  # AND there is no claude status footer (Model: ... Ctx:) on the pane.
+  local pane_tail
+  pane_tail=$(grep -v '^[[:space:]]*$' <<< "$pane_buf" | tail -1)
+  if [[ "$pane_tail" == *"Enter to confirm"* ]] \
+     && ! grep -qE "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf"; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      log "$pane: [DRY-RUN] would send Enter to dismiss Resume-from-summary modal"
+    else
+      log "$pane: dismissing Resume-from-summary modal (sending Enter)"
+      tmux send-keys -t "$pane" Enter 2>/dev/null
+    fi
+    miss_set "$pane" 0
+    return 0
+  fi
+
+  # Find the LAST line that matches claude's status footer. claude
+  # renders "Model:" and the "Remote Control active" indicator on the
+  # SAME line, so we only need to check whether that line carries the
+  # RC token. Anchoring to the footer line means scrollback content
+  # that mentions RC can't create a false-positive.
   #
   # The footer signature: "Model:<NBSP>Opus<NBSP>4.7<NBSP>...<NBSP>Ctx:".
   # Two subtleties that took a while to find:
@@ -93,8 +121,7 @@ check_pane() {
   #     numeric "X.Y" version after the provider keeps the pattern from
   #     binding to the regex source itself.
   local model_line
-  model_line=$(tmux capture-pane -p -t "$pane" 2>/dev/null \
-    | grep -E "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" | tail -1)
+  model_line=$(grep -E "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf" | tail -1)
 
   local cur
   cur=$(miss_get "$pane")
