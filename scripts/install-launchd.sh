@@ -1,24 +1,27 @@
 #!/bin/bash
-# install-launchd.sh — install (or remove) the claude-orchestrator LaunchAgent.
+# install-launchd.sh — install (or remove) the claude-orchestrator LaunchAgents.
 #
-# With no args: renders launchd/com.claude-orchestrator.plist.template with
-# this repo's absolute path, drops it at ~/Library/LaunchAgents/, and
-# bootstraps it via launchctl so the orchestrator tmux session comes up at
-# every login.
+# Installs two agents:
+#   * com.claude-orchestrator   — brings the "work" tmux session up at login.
+#   * com.claude-rc-watchdog    — polls panes for Remote-Control relay drops
+#                                 and SIGTERMs claude so claude-revive can
+#                                 re-register.
 #
-# With --uninstall: booteds it out and removes the plist.
+# Both plists are rendered from launchd/<label>.plist.template with this
+# repo's absolute path, dropped at ~/Library/LaunchAgents, and bootstrapped
+# via launchctl. Logs land in /tmp/<label>.log. Safe to re-run.
 #
-# Logs to /tmp/claude-orchestrator.log. Safe to re-run.
+# Flags:
+#   --uninstall           Remove both agents.
+#   --orchestrator-only   Install just the orchestrator (legacy behavior).
 
 set -euo pipefail
 
-LABEL="com.claude-orchestrator"
+LABELS=(com.claude-orchestrator com.claude-rc-watchdog)
 AGENT_DIR="$HOME/Library/LaunchAgents"
-PLIST="$AGENT_DIR/$LABEL.plist"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEMPLATE="$REPO/launchd/$LABEL.plist.template"
 
 say() { printf '\033[1;36m[launchd]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[launchd]\033[0m %s\n' "$*" >&2; }
@@ -28,39 +31,65 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 0
 fi
 
-bootout() {
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+bootout_label() {
+  launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
 }
 
-bootstrap() {
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-}
+install_label() {
+  local label=$1
+  local plist="$AGENT_DIR/$label.plist"
+  local template="$REPO/launchd/$label.plist.template"
 
-if [[ "${1:-}" == "--uninstall" ]]; then
-  if [[ -f "$PLIST" ]]; then
-    say "Unloading and removing $PLIST"
-    bootout
-    rm -f "$PLIST"
-  else
-    say "No plist at $PLIST — nothing to remove."
+  if [[ ! -f "$template" ]]; then
+    warn "Template missing: $template"
+    return 1
   fi
-  exit 0
-fi
 
-if [[ ! -f "$TEMPLATE" ]]; then
-  warn "Template missing: $TEMPLATE"
-  exit 1
-fi
+  say "Rendering $label with REPO=$REPO"
+  sed "s|__REPO__|$REPO|g" "$template" > "$plist"
+
+  say "Reloading $label..."
+  bootout_label "$label"
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+}
+
+uninstall_label() {
+  local label=$1
+  local plist="$AGENT_DIR/$label.plist"
+
+  if [[ -f "$plist" ]]; then
+    say "Unloading and removing $plist"
+    bootout_label "$label"
+    rm -f "$plist"
+  else
+    say "No plist at $plist — nothing to remove."
+  fi
+}
+
+case "${1:-}" in
+  --uninstall)
+    for l in "${LABELS[@]}"; do uninstall_label "$l"; done
+    exit 0
+    ;;
+  --orchestrator-only)
+    LABELS=(com.claude-orchestrator)
+    ;;
+  "")
+    : # default — install all
+    ;;
+  *)
+    warn "Unknown flag: $1"
+    warn "Usage: $0 [--uninstall | --orchestrator-only]"
+    exit 2
+    ;;
+esac
 
 mkdir -p "$AGENT_DIR"
 
-say "Rendering plist with REPO=$REPO"
-sed "s|__REPO__|$REPO|g" "$TEMPLATE" > "$PLIST"
+for label in "${LABELS[@]}"; do
+  install_label "$label"
+done
 
-say "Reloading LaunchAgent..."
-bootout
-bootstrap
-
-say "Installed. It will run at every login, and is running now."
-say "Logs: /tmp/claude-orchestrator.log"
+say "Installed: ${LABELS[*]}"
+say "Logs: /tmp/com.claude-orchestrator.log, /tmp/claude-rc-watchdog.log"
 say "Uninstall with: scripts/install-launchd.sh --uninstall"

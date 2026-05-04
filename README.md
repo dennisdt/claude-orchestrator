@@ -6,12 +6,14 @@ A tmux-based harness for running multiple persistent Claude Code sessions from o
 
 - `CLAUDE.md` — the orchestrator's system prompt. Loaded automatically when you run `claude` from this directory.
 - `bin/claude-revive` — a bash respawn loop around `claude --dangerously-skip-permissions --remote-control`. On any exit it restarts with `--continue` so history is preserved. If the cwd already has prior Claude history on disk, it resumes from the very first launch (not just on respawn). Ctrl+C during the 5-second grace window stops the loop.
+- `bin/claude-rc-watchdog` — external watchdog for relay drops. Polls every pane in a tmux session (default `work`), finds claude's status footer (the unique `Model: <provider> <ver> ... | Ctx: <value>` line, NBSP-tolerant), and when the `Remote Control active` indicator is missing for `THRESHOLD` consecutive checks it SIGTERMs claude on that pane's tty — `claude-revive` then respawns with `--continue`, re-registering with the relay. Tunable via `CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE}` env vars; supports `--dry-run` and `--once` for testing. Designed to run as a LaunchAgent (`com.claude-rc-watchdog`) so it survives logout and tmux server restarts.
 - `bin/claude-send` — sends text or a slash command to a named orchestrator window. For cron/CI/external-tool triggers, e.g. `claude-send example-api /compact`. Inside the orchestrator you'd just ask it in English — this helper exists for non-Claude callers.
 - `bin/claude-state` — TSV-based session tracker at `~/.claude-orchestrator/sessions.txt`. The orchestrator calls `claude-state add` after spawning, `claude-state remove` after killing, and `claude-state missing` on startup to detect sessions that should be restored after a reboot.
 - `scripts/start-work.sh` — creates (or attaches to) a tmux session named `work`, with an orchestrator Claude running in this directory under `claude-revive`. Accepts `--no-attach` for headless use (the LaunchAgent calls it this way).
 - `scripts/install.sh` — one-shot macOS setup for the tmux-Keychain bridge.
 - `scripts/install-launchd.sh` — installs (or removes with `--uninstall`) the LaunchAgent that brings the orchestrator up at every login.
-- `launchd/com.claude-orchestrator.plist.template` — the plist the installer renders with your repo's absolute path.
+- `launchd/com.claude-orchestrator.plist.template` — orchestrator plist (rendered with your repo's absolute path).
+- `launchd/com.claude-rc-watchdog.plist.template` — relay-drop watchdog plist; same render flow.
 - `.claude/settings.json` — project-scoped Claude Code permission allowlist for the tmux commands the orchestrator needs.
 - `tmux.conf.example` — the one-line `~/.tmux.conf` snippet the installer adds.
 
@@ -72,19 +74,22 @@ tmux kill-window -t work:<short-name>
 $CLAUDE_ORCHESTRATOR_HOME/bin/claude-state remove <short-name>
 ```
 
-Each spawned window runs Claude under `claude-revive`, so if remote control drops (macOS tmux + Anthropic remote-control servers do drop idle connections) or Claude crashes, the wrapper respawns with `--continue`.
+Each spawned window runs Claude under `claude-revive`, so if Claude crashes the wrapper respawns with `--continue`. Relay drops (where Claude stays alive but the websocket to the cloud relay dies, taking the mobile app and any external triggers offline) are handled by the separate `claude-rc-watchdog`, which polls panes for the `Remote Control active` footer and SIGTERMs Claude when it goes missing — letting `claude-revive`'s respawn loop re-register the websocket.
 
 ## Auto-start at login (optional)
 
-If you want the orchestrator + any sessions it manages to come up automatically every time you log in, install the LaunchAgent:
+If you want the orchestrator + any sessions it manages to come up automatically every time you log in, install the LaunchAgents:
 
 ```bash
 scripts/install-launchd.sh
 ```
 
-This renders `launchd/com.claude-orchestrator.plist.template` with your repo's absolute path, drops it at `~/Library/LaunchAgents/com.claude-orchestrator.plist`, and bootstraps it via `launchctl`. At login it runs `scripts/start-work.sh --no-attach` — the tmux session is created in the background; open your terminal and run `start-work.sh` (or `tmux attach -t work`) to connect.
+This installs two agents:
 
-Logs go to `/tmp/claude-orchestrator.log`. Uninstall with:
+- `com.claude-orchestrator` — runs `scripts/start-work.sh --no-attach` at login, bringing the tmux session up in the background. Open your terminal and run `start-work.sh` (or `tmux attach -t work`) to connect. Logs to `/tmp/com.claude-orchestrator.log`.
+- `com.claude-rc-watchdog` — runs `bin/claude-rc-watchdog` continuously (KeepAlive) so relay drops are detected and Claude is force-restarted into a fresh `--remote-control` registration. Logs to `/tmp/claude-rc-watchdog.log`.
+
+Both plists are rendered from `launchd/<label>.plist.template` with your repo's absolute path and dropped at `~/Library/LaunchAgents/`. Pass `--orchestrator-only` to skip the watchdog. Uninstall both with:
 
 ```bash
 scripts/install-launchd.sh --uninstall
@@ -111,10 +116,12 @@ claude-orchestrator/
 │   └── settings.json         # project-scoped tmux permission allowlist
 ├── bin/
 │   ├── claude-revive         # respawn loop
+│   ├── claude-rc-watchdog    # external relay-drop watchdog
 │   ├── claude-send           # external trigger helper
 │   └── claude-state          # session state tracker (for restore-on-reboot)
 ├── launchd/
-│   └── com.claude-orchestrator.plist.template
+│   ├── com.claude-orchestrator.plist.template
+│   └── com.claude-rc-watchdog.plist.template
 └── scripts/
     ├── install.sh            # brew + tmux.conf setup
     ├── install-launchd.sh    # login auto-start (optional)

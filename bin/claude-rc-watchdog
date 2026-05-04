@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# claude-rc-watchdog — external watchdog for Claude Code's --remote-control relay.
+#
+# Background: `claude --remote-control` registers a websocket with the cloud
+# relay so the Claude Code mobile app can reach the session. That websocket
+# can drop silently — the claude process stays alive, but the footer's
+# "Remote Control active" indicator disappears and the mobile app loses
+# the session. claude-revive's restart-on-exit doesn't help here because
+# claude never exits.
+#
+# This watchdog polls every pane in a tmux session, looks at ONLY the
+# footer area (last 3 lines of visible content — never scrollback), and
+# when the RC indicator is missing for THRESHOLD consecutive checks while
+# claude's UI is still rendering, sends SIGTERM to the claude process on
+# that pane's tty. claude-revive's existing respawn loop then relaunches
+# with `--continue`, which re-registers with the relay.
+#
+# Design choices:
+#   * Footer-only capture (`tail -3`) — avoids matching arbitrary
+#     scrollback content that mentions "Remote Control active".
+#   * Identify claude via tty (`ps -t`), not PPID (`pgrep -P`) — macOS
+#     pgrep can transiently miss PPID-matched children.
+#   * In-memory miss counts keyed by pane id — survives across panes
+#     being added/removed within a single watchdog run.
+#   * --dry-run prints actions without sending signals (for testing).
+#   * --once runs a single iteration and exits (for testing / cron).
+
+set -u
+
+SESSION="${CLAUDE_RC_WATCHDOG_SESSION:-work}"
+INTERVAL="${CLAUDE_RC_WATCHDOG_INTERVAL:-60}"
+THRESHOLD="${CLAUDE_RC_WATCHDOG_THRESHOLD:-2}"
+GRACE="${CLAUDE_RC_WATCHDOG_GRACE:-45}"
+DRY_RUN=0
+ONCE=0
+
+usage() {
+  cat <<EOF
+Usage: claude-rc-watchdog [--session NAME] [--interval SECS] [--threshold N]
+                          [--grace SECS] [--dry-run] [--once]
+
+Polls every pane in tmux session NAME (default: $SESSION). For each pane,
+finds the LAST "Model: Opus|Sonnet|Haiku" line (claude's status footer);
+if that same line lacks "Remote Control active" for N consecutive checks
+(default: $THRESHOLD), SIGTERMs claude so claude-revive can re-register
+with the relay. Anchoring to the Model line avoids false-positives from
+scrollback content that mentions RC.
+
+Env vars: CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE}
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)   SESSION="$2"; shift 2;;
+    --interval)  INTERVAL="$2"; shift 2;;
+    --threshold) THRESHOLD="$2"; shift 2;;
+    --grace)     GRACE="$2"; shift 2;;
+    --dry-run)   DRY_RUN=1; shift;;
+    --once)      ONCE=1; shift;;
+    -h|--help)   usage; exit 0;;
+    *)           echo "[watchdog] unknown arg: $1" >&2; usage >&2; exit 2;;
+  esac
+done
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+# Per-pane state via indirect-variable expansion (bash 3.2 compatible —
+# macOS only ships bash 3.2, no associative arrays available).
+miss_key()  { printf 'miss_%s' "$(printf '%s' "$1" | tr -c 'a-zA-Z0-9_' '_')"; }
+miss_get()  { local k; k=$(miss_key "$1"); printf '%s' "${!k:-0}"; }
+miss_set()  { local k; k=$(miss_key "$1"); printf -v "$k" '%s' "$2"; }
+
+check_pane() {
+  local pane="$1"
+  # Capture the visible pane (no scrollback) and find the LAST line that
+  # matches claude's status footer. claude renders Model and the
+  # "Remote Control active" indicator on the SAME line, so we only need
+  # to check whether that line carries the RC token. Anchoring to the
+  # footer line means scrollback content that mentions RC can't create
+  # a false-positive.
+  #
+  # The footer signature: "Model:<NBSP>Opus<NBSP>4.7<NBSP>...<NBSP>Ctx:".
+  # Two subtleties that took a while to find:
+  #   * Word separators in the footer are NBSP (U+00A0, UTF-8 c2 a0) —
+  #     not ASCII space — so naive `Model: Opus` patterns never match.
+  #     `.` covers NBSP cleanly under a UTF-8 locale.
+  #   * Tool output sometimes echoes this very script's source back
+  #     into the pane, so the pattern has to reject literals like
+  #     `Model: (Opus|Sonnet|Haiku) [0-9].*\| Ctx:`. Requiring an actual
+  #     numeric "X.Y" version after the provider keeps the pattern from
+  #     binding to the regex source itself.
+  local model_line
+  model_line=$(tmux capture-pane -p -t "$pane" 2>/dev/null \
+    | grep -E "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" | tail -1)
+
+  local cur
+  cur=$(miss_get "$pane")
+
+  # No Model line visible: shell prompt, modal, startup, or claude is
+  # rendering a full-screen UI element. Can't tell — don't count as miss.
+  if [[ -z "$model_line" ]]; then
+    miss_set "$pane" 0
+    return 0
+  fi
+
+  # Model line present AND carries the RC token → healthy.
+  if [[ "$model_line" == *"Remote Control active"* ]]; then
+    if [[ "$cur" -gt 0 ]]; then
+      log "$pane: RC recovered (was at miss=$cur)"
+    fi
+    miss_set "$pane" 0
+    return 0
+  fi
+
+  # Model line present, RC token missing → confirmed drop.
+  cur=$((cur + 1))
+  miss_set "$pane" "$cur"
+  log "$pane: RC missing (miss $cur/$THRESHOLD)"
+
+  if [[ $cur -ge $THRESHOLD ]]; then
+    fire_restart "$pane"
+    miss_set "$pane" 0
+  fi
+}
+
+fire_restart() {
+  local pane="$1"
+  local tty short claude_pid
+  tty=$(tmux display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null)
+  short=${tty##*/}
+
+  if [[ -z "$short" ]]; then
+    log "$pane: WARN can't resolve tty — skipping"
+    return
+  fi
+
+  # Find the claude process on this pane's tty. We match on the command
+  # args (claude + --remote-control) rather than relying on pgrep -P,
+  # which has been observed to miss legit children on macOS.
+  claude_pid=$(ps -t "$short" -o pid=,command= 2>/dev/null \
+    | awk '/claude .*--remote-control/ && !/awk/ {print $1; exit}')
+
+  if [[ -z "$claude_pid" ]]; then
+    log "$pane: WARN no claude --remote-control process on $tty — skipping (wrapper may already be respawning)"
+    return
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "$pane: [DRY-RUN] would SIGTERM claude PID $claude_pid (tty $tty)"
+    return
+  fi
+
+  log "$pane: SIGTERM claude PID $claude_pid (tty $tty) — wrapper will respawn with --continue"
+  kill -TERM "$claude_pid" 2>/dev/null || log "$pane: WARN SIGTERM to $claude_pid failed"
+}
+
+log "starting (session=$SESSION interval=${INTERVAL}s threshold=$THRESHOLD grace=${GRACE}s dry_run=$DRY_RUN once=$ONCE)"
+
+# In --once mode, a missing session is a hard error so a typo isn't silent.
+if [[ $ONCE -eq 1 ]] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  log "tmux session '$SESSION' not found — exiting (--once mode)"
+  exit 1
+fi
+
+# Grace lets a fresh login + claude-revive register before we judge.
+if [[ $ONCE -eq 0 && $GRACE -gt 0 ]]; then
+  sleep "$GRACE"
+fi
+
+trap 'log "stopping"; exit 0' INT TERM
+
+while :; do
+  # The tmux session can come and go (kill-server, late orchestrator
+  # bootstrap on login, etc.). Don't exit — just wait it out.
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    [[ $ONCE -eq 1 ]] && exit 0
+    sleep "$INTERVAL"
+    continue
+  fi
+
+  panes=$(tmux list-panes -s -t "$SESSION" -F '#{pane_id}' 2>/dev/null || true)
+  for p in $panes; do
+    check_pane "$p"
+  done
+
+  [[ $ONCE -eq 1 ]] && exit 0
+  sleep "$INTERVAL"
+done

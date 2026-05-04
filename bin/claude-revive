@@ -9,15 +9,22 @@
 #
 # On any exit, respawns with --continue so in-conversation history is
 # preserved. Press Ctrl+C during the 5s grace window to stop the loop.
+#
+# Remote-Control relay drops (where claude stays alive but the cloud
+# websocket dies) are handled by the separate `claude-rc-watchdog`,
+# which polls panes externally and SIGTERMs claude when the footer's
+# "Remote Control active" indicator goes missing — triggering this
+# script's restart loop, which re-registers via --continue.
 
 set -u
 
 FLAGS=(--dangerously-skip-permissions --remote-control)
 
-# Claude encodes project dirs by replacing / with - (so /Users/foo becomes
-# -Users-foo under ~/.claude/projects). If that directory has any .jsonl
-# transcripts, there's a prior session to resume.
-encoded_cwd="$(pwd | sed 's|/|-|g')"
+# Claude encodes project dirs by replacing /, ., and _ with - (so
+# /Volumes/SAMSUNG_SSD_990_PRO/.foo becomes -Volumes-SAMSUNG-SSD-990-PRO--foo
+# under ~/.claude/projects). Resolve symlinks first (pwd -P) so a window
+# launched via a symlinked path still finds the real transcript directory.
+encoded_cwd="$(pwd -P | sed 's|[/._]|-|g')"
 project_dir="$HOME/.claude/projects/$encoded_cwd"
 shopt -s nullglob
 jsonls=("$project_dir"/*.jsonl)
@@ -40,8 +47,8 @@ while true; do
   else
     claude "${FLAGS[@]}" --continue
   fi
-
   status=$?
+
   echo ""
   echo "[claude-revive] Claude exited (status $status) at $(date)."
   echo "[claude-revive] Restarting in 5s. Ctrl+C to stop the loop."
