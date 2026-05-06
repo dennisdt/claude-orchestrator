@@ -127,9 +127,14 @@ check_pane() {
   cur=$(miss_get "$pane")
 
   # No Model line visible: shell prompt, modal, startup, or claude is
-  # rendering a full-screen UI element. Can't tell — don't count as miss.
+  # rendering a full-screen UI element (e.g. "Compacting conversation").
+  # Can't tell whether RC is healthy — skip this poll without incrementing.
+  # IMPORTANT: don't RESET the miss counter either — full-screen UIs flicker
+  # in and out during long ops, and resetting on every flicker masks real
+  # RC drops (observed: 18-min recovery instead of designed ~2-min when a
+  # pane was compacting). Holding the counter means a confirmed-miss state
+  # survives transient no-footer renders.
   if [[ -z "$model_line" ]]; then
-    miss_set "$pane" 0
     return 0
   fi
 
