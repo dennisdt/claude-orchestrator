@@ -87,7 +87,7 @@ scripts/install-launchd.sh
 This installs two agents:
 
 - `com.claude-orchestrator` — runs `scripts/start-work.sh --no-attach` at login, bringing the tmux session up in the background. Open your terminal and run `start-work.sh` (or `tmux attach -t work`) to connect. Logs to `/tmp/com.claude-orchestrator.log`.
-- `com.claude-rc-watchdog` — runs `bin/claude-rc-watchdog` continuously (KeepAlive) so relay drops are detected and Claude is force-restarted into a fresh `--remote-control` registration. Logs to `/tmp/claude-rc-watchdog.log`.
+- `com.claude-rc-watchdog` — runs `bin/claude-rc-watchdog` continuously (KeepAlive) so relay drops are detected and Claude is force-restarted into a fresh `--remote-control` registration. The plist wraps the daemon in `caffeinate -i`, which holds a `PreventUserIdleSystemSleep` assertion for the daemon's lifetime — without it, when all panes go quiet the Mac enters Idle Sleep, the relay websockets time out, and the watchdog only runs in recovery mode (the lid-close and scheduled-sleep paths are unaffected). Logs to `/tmp/claude-rc-watchdog.log`.
 
 Both plists are rendered from `launchd/<label>.plist.template` with your repo's absolute path and dropped at `~/Library/LaunchAgents/`. Pass `--orchestrator-only` to skip the watchdog. Uninstall both with:
 

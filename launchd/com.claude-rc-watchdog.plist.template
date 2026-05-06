@@ -5,8 +5,20 @@
     <key>Label</key>
     <string>com.claude-rc-watchdog</string>
 
+    <!--
+      caffeinate -i wraps the watchdog so it holds a
+      PreventUserIdleSystemSleep assertion for as long as the daemon
+      runs. Without this, Mac enters Idle Sleep when all 6 claude panes
+      go quiet (claude's own caffeinate -i -t 300 only fires per-Bash-
+      tool, ~5 min lease), the relay websockets time out, and the
+      watchdog only runs in recovery mode. With caffeinate -i, the
+      Mac stays awake whenever the watchdog is loaded — the Mac can
+      still sleep on lid close or scheduled sleep, just not on idle.
+    -->
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
         <string>__REPO__/bin/claude-rc-watchdog</string>
     </array>
 

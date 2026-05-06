@@ -16,7 +16,7 @@ $CLAUDE_ORCHESTRATOR_HOME/bin/claude-state add <short-name> <directory>
 
 The `claude-state add` call records the session in `~/.claude-orchestrator/sessions.txt` so it can be restored after a reboot.
 
-Relay drops (websocket dies but `claude` stays alive) are handled by `claude-rc-watchdog`, a separate LaunchAgent that polls panes and SIGTERMs `claude` when the `Remote Control active` footer disappears, letting `claude-revive` respawn with `--continue`. The watchdog also auto-dismisses the "Resume from summary / Resume full" modal that `--continue` may land on, so panes don't blackhole on the modal after a SIGTERM.
+Relay drops (websocket dies but `claude` stays alive) are handled by `claude-rc-watchdog`, a separate LaunchAgent that polls panes and SIGTERMs `claude` when the `Remote Control active` footer disappears, letting `claude-revive` respawn with `--continue`. The watchdog also auto-dismisses the "Resume from summary / Resume full" modal that `--continue` may land on, so panes don't blackhole on the modal after a SIGTERM. The watchdog plist wraps the daemon in `caffeinate -i` to hold a `PreventUserIdleSystemSleep` assertion, which prevents the Mac from entering Idle Sleep when all panes go quiet (claude's own per-Bash-tool `caffeinate -i -t 300` is short-lived; without the watchdog-level assertion, the relay websockets time out during sleep and the watchdog runs only in recovery mode).
 
 ## How to list running sessions
 
