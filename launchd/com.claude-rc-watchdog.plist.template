@@ -14,12 +14,19 @@
       watchdog only runs in recovery mode. With caffeinate -i, the
       Mac stays awake whenever the watchdog is loaded — the Mac can
       still sleep on lid close or scheduled sleep, just not on idle.
+
+      The /bin/bash -c wrapper redirects stdout/stderr to the log file
+      in APPEND mode (>>). Using StandardOutPath/StandardErrorPath
+      directly would O_TRUNC the file every LaunchAgent boot, wiping
+      the SIGTERM/modal-dismiss audit trail across restarts. With
+      append mode, the watchdog's own "[ts] starting (...)" banner
+      doubles as a boot marker.
     -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-i</string>
-        <string>__REPO__/bin/claude-rc-watchdog</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec /usr/bin/caffeinate -i __REPO__/bin/claude-rc-watchdog >> /tmp/claude-rc-watchdog.log 2>&amp;1</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -40,11 +47,5 @@
         <key>LC_CTYPE</key>
         <string>en_US.UTF-8</string>
     </dict>
-
-    <key>StandardOutPath</key>
-    <string>/tmp/claude-rc-watchdog.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/tmp/claude-rc-watchdog.log</string>
 </dict>
 </plist>
