@@ -31,6 +31,13 @@ SESSION="${CLAUDE_RC_WATCHDOG_SESSION:-work}"
 INTERVAL="${CLAUDE_RC_WATCHDOG_INTERVAL:-60}"
 THRESHOLD="${CLAUDE_RC_WATCHDOG_THRESHOLD:-2}"
 GRACE="${CLAUDE_RC_WATCHDOG_GRACE:-45}"
+# Per-pane quiet window after a SIGTERM: claude-revive respawns with
+# --continue, and a large-context resume renders the Model: footer well
+# before the relay websocket re-registers ("Remote Control active"). Without
+# this cooldown the watchdog re-kills mid-boot and loops forever — and the
+# rapid re-registration churn can make the relay itself reject new sessions
+# ("Session creation failed"). Must comfortably exceed boot+register time.
+RESTART_COOLDOWN="${CLAUDE_RC_WATCHDOG_COOLDOWN:-120}"
 DRY_RUN=0
 ONCE=0
 
@@ -46,7 +53,7 @@ if that same line lacks "Remote Control active" for N consecutive checks
 with the relay. Anchoring to the Model line avoids false-positives from
 scrollback content that mentions RC.
 
-Env vars: CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE}
+Env vars: CLAUDE_RC_WATCHDOG_{SESSION,INTERVAL,THRESHOLD,GRACE,COOLDOWN}
 EOF
 }
 
@@ -73,6 +80,13 @@ miss_key()  { printf 'miss_%s' "$(printf '%s' "$1" | tr -c 'a-zA-Z0-9_' '_')"; }
 miss_get()  { local k; k=$(miss_key "$1"); printf '%s' "${!k:-0}"; }
 miss_set()  { local k; k=$(miss_key "$1"); printf -v "$k" '%s' "$2"; }
 
+# Per-pane cooldown deadline (epoch seconds) — set after a SIGTERM so the
+# respawning session gets RESTART_COOLDOWN seconds to boot and re-register
+# before the watchdog judges it again.
+cd_key()  { printf 'cd_%s' "$(printf '%s' "$1" | tr -c 'a-zA-Z0-9_' '_')"; }
+cd_get()  { local k; k=$(cd_key "$1"); printf '%s' "${!k:-0}"; }
+cd_set()  { local k; k=$(cd_key "$1"); printf -v "$k" '%s' "$2"; }
+
 check_pane() {
   local pane="$1"
   local pane_buf
@@ -87,12 +101,19 @@ check_pane() {
   #
   # Detection has to be position-aware: "Resume from summary" can land
   # in scrollback (claude quoting the modal text in its own responses),
-  # so anchor to the BOTTOM of the pane. When the modal is live, the
-  # last non-empty visible line is "Enter to confirm · Esc to cancel"
-  # AND there is no claude status footer (Model: ... Ctx:) on the pane.
-  local pane_tail
-  pane_tail=$(grep -v '^[[:space:]]*$' <<< "$pane_buf" | tail -1)
-  if [[ "$pane_tail" == *"Enter to confirm"* ]] \
+  # so anchor to the BOTTOM of the pane. Earlier this keyed off the
+  # "Enter to confirm · Esc to cancel" hint being the LAST visible line,
+  # but that hint isn't always rendered as the last line (the option list
+  # can sit below it, or it scrolls off), so the modal was missed and the
+  # pane blackholed. Instead, require BOTH option lines ("Resume from
+  # summary" + "Resume full session") within the bottom slice of the pane,
+  # AND no claude status footer (Model: ... Ctx:) anywhere — the footer's
+  # absence rules out the case where claude is live and merely quoting the
+  # modal text in scrollback.
+  local pane_bottom
+  pane_bottom=$(grep -v '^[[:space:]]*$' <<< "$pane_buf" | tail -10)
+  if grep -q "Resume from summary" <<< "$pane_bottom" \
+     && grep -q "Resume full session" <<< "$pane_bottom" \
      && ! grep -qE "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf"; then
     if [[ $DRY_RUN -eq 1 ]]; then
       log "$pane: [DRY-RUN] would send Enter to dismiss Resume-from-summary modal"
@@ -104,11 +125,29 @@ check_pane() {
     return 0
   fi
 
-  # Find the LAST line that matches claude's status footer. claude
-  # renders "Model:" and the "Remote Control active" indicator on the
-  # SAME line, so we only need to check whether that line carries the
-  # RC token. Anchoring to the footer line means scrollback content
-  # that mentions RC can't create a false-positive.
+  # Post-restart cooldown. If we SIGTERMed this pane recently, give the
+  # respawn time to boot and re-register before judging it again. The modal
+  # check above still runs during cooldown (a respawn that lands on the
+  # resume modal must be dismissed to finish booting), but RC miss-counting
+  # is suppressed here so we don't re-kill mid-boot and loop.
+  local now cd_until
+  now=$(date +%s)
+  cd_until=$(cd_get "$pane")
+  if [[ "$now" -lt "$cd_until" ]]; then
+    miss_set "$pane" 0
+    return 0
+  fi
+
+  # Evaluate claude's status footer over the BOTTOM slice of the pane,
+  # NOT a single line. claude's footer is multi-line and the line count
+  # depends on pane width: in a narrow/unattached pane (e.g. 80 cols) it
+  # wraps to "Model: ... Ctx:" on one line, a permissions line below it,
+  # and "Remote Control active" on a THIRD line — so the RC indicator is
+  # never on the Model line. (The earlier same-line check silently treated
+  # every healthy 80-col pane as RC-missing and killed it on a ~2-min loop.)
+  # Co-locating both checks in the bottom slice handles any wrap layout
+  # while still rejecting scrollback mentions of RC: a stray "Remote Control
+  # active" higher up won't sit in the slice next to the live footer.
   #
   # The footer signature: "Model:<NBSP>Opus<NBSP>4.7<NBSP>...<NBSP>Ctx:".
   # Two subtleties that took a while to find:
@@ -120,26 +159,37 @@ check_pane() {
   #     `Model: (Opus|Sonnet|Haiku) [0-9].*\| Ctx:`. Requiring an actual
   #     numeric "X.Y" version after the provider keeps the pattern from
   #     binding to the regex source itself.
-  local model_line
-  model_line=$(grep -E "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf" | tail -1)
+  # Anchor the footer slice to the LAST "Model: ... Ctx:" line and take
+  # everything from there to the bottom of the pane. The footer is pinned to
+  # the pane bottom and its RC indicator wraps onto a line BELOW the Model
+  # line in narrow panes, so slicing downward from the Model line spans the
+  # whole footer regardless of wrap — while EXCLUDING the transcript above
+  # it. A flat `tail -N` would also pull in the few transcript lines sitting
+  # just above the footer, where a stray "Remote Control active" in
+  # conversation text (e.g. a pane whose session is itself discussing Remote
+  # Control) could fake a healthy read and mask a real drop. `tail -1` on the
+  # grep keeps the LIVE footer when scrollback also quotes a Model line.
+  local model_lineno footer
+  model_lineno=$(grep -nE "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf" | tail -1 | cut -d: -f1)
 
   local cur
   cur=$(miss_get "$pane")
 
-  # No Model line visible: shell prompt, modal, startup, or claude is
+  # No Model footer rendered: shell prompt, modal, startup, or claude is
   # rendering a full-screen UI element (e.g. "Compacting conversation").
   # Can't tell whether RC is healthy — skip this poll without incrementing.
   # IMPORTANT: don't RESET the miss counter either — full-screen UIs flicker
   # in and out during long ops, and resetting on every flicker masks real
-  # RC drops (observed: 18-min recovery instead of designed ~2-min when a
+  # RC drops (observed: 18-min recovery instead of the designed ~2-min when a
   # pane was compacting). Holding the counter means a confirmed-miss state
   # survives transient no-footer renders.
-  if [[ -z "$model_line" ]]; then
+  if [[ -z "$model_lineno" ]]; then
     return 0
   fi
+  footer=$(tail -n +"$model_lineno" <<< "$pane_buf")
 
-  # Model line present AND carries the RC token → healthy.
-  if [[ "$model_line" == *"Remote Control active"* ]]; then
+  # Footer present AND the RC indicator appears in the footer block → healthy.
+  if grep -q "Remote Control active" <<< "$footer"; then
     if [[ "$cur" -gt 0 ]]; then
       log "$pane: RC recovered (was at miss=$cur)"
     fi
@@ -147,7 +197,7 @@ check_pane() {
     return 0
   fi
 
-  # Model line present, RC token missing → confirmed drop.
+  # Footer present, RC indicator missing → confirmed drop.
   cur=$((cur + 1))
   miss_set "$pane" "$cur"
   log "$pane: RC missing (miss $cur/$THRESHOLD)"
@@ -155,6 +205,7 @@ check_pane() {
   if [[ $cur -ge $THRESHOLD ]]; then
     fire_restart "$pane"
     miss_set "$pane" 0
+    cd_set "$pane" "$(( $(date +%s) + RESTART_COOLDOWN ))"
   fi
 }
 
@@ -189,7 +240,7 @@ fire_restart() {
   kill -TERM "$claude_pid" 2>/dev/null || log "$pane: WARN SIGTERM to $claude_pid failed"
 }
 
-log "starting (session=$SESSION interval=${INTERVAL}s threshold=$THRESHOLD grace=${GRACE}s dry_run=$DRY_RUN once=$ONCE)"
+log "starting (session=$SESSION interval=${INTERVAL}s threshold=$THRESHOLD grace=${GRACE}s cooldown=${RESTART_COOLDOWN}s dry_run=$DRY_RUN once=$ONCE)"
 
 # In --once mode, a missing session is a hard error so a typo isn't silent.
 if [[ $ONCE -eq 1 ]] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
