@@ -33,15 +33,17 @@ $CLAUDE_ORCHESTRATOR_HOME/bin/claude-state remove <short-name>
 
 ## Restoring sessions after a reboot
 
+`start-work.sh` auto-restores any tracked project sessions that aren't currently in tmux, so after a login (via the LaunchAgent) or a manual `start-work.sh` run, missing windows come back without orchestrator involvement. Entries whose project directory no longer exists on disk are skipped with a WARN in `/tmp/claude-orchestrator.log` and left in state for human review.
+
 On your first response after startup (the first user message you receive in a fresh conversation), run:
 
 ```bash
 $CLAUDE_ORCHESTRATOR_HOME/bin/claude-state missing
 ```
 
-Each non-empty line is a `<name>\t<path>` for a session recorded in state but not currently present as a tmux window. If there is any output, tell the user which sessions are missing and ask whether to respawn them. If they agree, spawn each one using the standard spawn recipe above (the `claude-revive` wrapper will automatically resume each project's prior conversation). If they decline, remove those entries from state with `claude-state remove`.
+This is a fallback for the cases auto-restore couldn't handle (usually a deleted project directory) or the rare case where `start-work.sh` hasn't run yet. Each non-empty line is `<name>\t<path>` for such a session. If there is output, tell the user which sessions are still missing and offer either to respawn them (after they confirm the directory is back) or to remove the stale entries with `claude-state remove`. If there's no output, do not mention restoration at all.
 
-Do this check **once per fresh startup** — if you've already asked in this conversation, don't ask again. Do NOT track or restore the orchestrator window itself; only project windows belong in state.
+Do this check **once per fresh startup** — if you've already checked in this conversation, don't check again. Do NOT track or restore the orchestrator window itself; only project windows belong in state.
 
 ## Notes
 - Always use the session name "work"

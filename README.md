@@ -99,7 +99,7 @@ scripts/install-launchd.sh --uninstall
 
 Claude Code writes every conversation to `~/.claude/projects/<encoded-cwd>/*.jsonl` on every turn, so per-project histories survive any reboot, crash, or `tmux kill-server`. What doesn't survive is the tmux windows themselves — they need to be respawned.
 
-`claude-orchestrator` tracks spawned windows in `~/.claude-orchestrator/sessions.txt` (TSV: `<name>\t<path>`). After a reboot, `scripts/start-work.sh` (or the LaunchAgent) recreates only the orchestrator window. On your first message, the orchestrator runs `claude-state missing`, sees which project sessions aren't back yet, and asks whether to respawn them. Say yes and each comes back with `--continue` and its full prior history; say no and the entries are dropped from state.
+`claude-orchestrator` tracks spawned windows in `~/.claude-orchestrator/sessions.txt` (TSV: `<name>\t<path>`). After a reboot (or any tmux server restart), `scripts/start-work.sh` — invoked either by the LaunchAgent or manually — brings the orchestrator window back AND auto-respawns every tracked project session whose directory still exists. Each comes back under `claude-revive`, which resumes with `--continue` and its full prior history. Stale entries (project dir removed) are skipped with a WARN in `/tmp/claude-orchestrator.log`; on its first response, the orchestrator checks `claude-state missing` as a fallback and surfaces any still-missing sessions so you can confirm respawn or drop them from state.
 
 ## Layout
 

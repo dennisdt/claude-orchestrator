@@ -40,17 +40,36 @@ maybe_attach() {
   tmux attach -t work
 }
 
+# Auto-restore tracked project sessions that aren't currently in tmux. Runs
+# in both the "session already up" and "session just created" paths so the
+# user doesn't have to confirm respawns after a tmux kill-server. The dir
+# check skips state entries whose project directory has been removed; those
+# get surfaced by the orchestrator's own claude-state missing check instead.
+restore_missing() {
+  local name path
+  while IFS=$'\t' read -r name path; do
+    [[ -z "$name" ]] && continue
+    if [[ ! -d "$path" ]]; then
+      printf '[start-work] WARN %s -> %s: dir missing, skipping\n' "$name" "$path" >&2
+      continue
+    fi
+    printf '[start-work] restoring %s -> %s\n' "$name" "$path"
+    tmux new-window -t work -c "$path" -n "$name"
+    tmux send-keys -t "work:$name" "$REVIVE" Enter
+  done < <("$REPO/bin/claude-state" missing)
+}
+
 if tmux has-session -t work 2>/dev/null; then
   # Refresh the global env in case the repo moved since the server started.
   tmux set-environment -g CLAUDE_ORCHESTRATOR_HOME "$REPO"
-  maybe_attach
-  exit 0
+else
+  # Seed the tmux server env before spawning any windows so every child shell
+  # inherits CLAUDE_ORCHESTRATOR_HOME.
+  tmux set-environment -g CLAUDE_ORCHESTRATOR_HOME "$REPO"
+  tmux new-session -d -s work -c "$REPO" -n orchestrator
+  tmux send-keys -t work:orchestrator "$REVIVE" Enter
 fi
 
-# Seed the tmux server env before spawning any windows so every child shell
-# inherits CLAUDE_ORCHESTRATOR_HOME.
-tmux set-environment -g CLAUDE_ORCHESTRATOR_HOME "$REPO"
-tmux new-session -d -s work -c "$REPO" -n orchestrator
-tmux send-keys -t work:orchestrator "$REVIVE" Enter
+restore_missing
 
 maybe_attach
