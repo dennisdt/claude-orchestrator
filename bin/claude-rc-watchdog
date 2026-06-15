@@ -92,6 +92,22 @@ check_pane() {
   local pane_buf
   pane_buf=$(tmux capture-pane -p -t "$pane" 2>/dev/null) || return 0
 
+  # Per-window skip list. Windows whose name appears (one per line) in
+  # ~/.claude-orchestrator/rc-watchdog-skip are left untouched: no miss
+  # counting, no SIGTERM. This is the escape hatch for a session whose
+  # remote-control relay genuinely will not connect (so the footer never
+  # renders "Remote Control active") but that should stay alive for
+  # local/attached use rather than being force-restarted every cycle.
+  # Remove the name (or the file) and the watchdog resumes managing it.
+  local skip_file="$HOME/.claude-orchestrator/rc-watchdog-skip"
+  if [[ -f "$skip_file" ]]; then
+    local win
+    win=$(tmux display-message -p -t "$pane" '#{window_name}' 2>/dev/null)
+    if [[ -n "$win" ]] && grep -qxF "$win" "$skip_file" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
   # Resume-from-summary modal: if claude-revive's --continue lands in a
   # large context, claude blocks on a "1. Resume from summary | 2. Resume
   # full | 3. Don't ask me again" prompt that the wrapper itself can't
@@ -114,7 +130,7 @@ check_pane() {
   pane_bottom=$(grep -v '^[[:space:]]*$' <<< "$pane_buf" | tail -10)
   if grep -q "Resume from summary" <<< "$pane_bottom" \
      && grep -q "Resume full session" <<< "$pane_bottom" \
-     && ! grep -qE "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf"; then
+     && ! grep -qE "Model:.(Opus|Sonnet|Haiku|Fable).[0-9]+.*Ctx:" <<< "$pane_buf"; then
     if [[ $DRY_RUN -eq 1 ]]; then
       log "$pane: [DRY-RUN] would send Enter to dismiss Resume-from-summary modal"
     else
@@ -170,7 +186,7 @@ check_pane() {
   # Control) could fake a healthy read and mask a real drop. `tail -1` on the
   # grep keeps the LIVE footer when scrollback also quotes a Model line.
   local model_lineno footer
-  model_lineno=$(grep -nE "Model:.(Opus|Sonnet|Haiku).[0-9]+\.[0-9]+.*Ctx:" <<< "$pane_buf" | tail -1 | cut -d: -f1)
+  model_lineno=$(grep -nE "Model:.(Opus|Sonnet|Haiku|Fable).[0-9]+.*Ctx:" <<< "$pane_buf" | tail -1 | cut -d: -f1)
 
   local cur
   cur=$(miss_get "$pane")
@@ -189,7 +205,11 @@ check_pane() {
   footer=$(tail -n +"$model_lineno" <<< "$pane_buf")
 
   # Footer present AND the RC indicator appears in the footer block → healthy.
-  if grep -q "Remote Control active" <<< "$footer"; then
+  # Two footer formats over time: old builds render "Remote Control active";
+  # current builds render "/rc active". Match either so a live relay on the
+  # new build isn't misread as a drop (that false-negative kill-looped every
+  # Opus footer once the model line became parseable again).
+  if grep -qE "Remote Control active|/rc active" <<< "$footer"; then
     if [[ "$cur" -gt 0 ]]; then
       log "$pane: RC recovered (was at miss=$cur)"
     fi
