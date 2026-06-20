@@ -44,7 +44,14 @@ shopt -s nullglob
 jsonls=("$project_dir"/*.jsonl)
 shopt -u nullglob
 
-if [[ ${#jsonls[@]} -gt 0 ]]; then
+if [[ "${CLAUDE_REVIVE_FRESH:-0}" == "1" ]]; then
+  # Opt-in override: force a brand-new conversation even when prior history
+  # exists on disk. The fresh first launch creates a new transcript; the
+  # respawn loop's --continue then resumes THAT new conversation, not the old.
+  # One-shot by design — pass it as a command prefix, not an exported var.
+  revive_log "CLAUDE_REVIVE_FRESH=1 — starting a brand-new session for $(pwd) (ignoring ${#jsonls[@]} prior transcript(s))."
+  first=1
+elif [[ ${#jsonls[@]} -gt 0 ]]; then
   revive_log "Found prior history for $(pwd) — resuming with --continue."
   first=0
 else

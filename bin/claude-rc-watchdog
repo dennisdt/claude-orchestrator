@@ -205,11 +205,21 @@ check_pane() {
   footer=$(tail -n +"$model_lineno" <<< "$pane_buf")
 
   # Footer present AND the RC indicator appears in the footer block → healthy.
-  # Two footer formats over time: old builds render "Remote Control active";
-  # current builds render "/rc active". Match either so a live relay on the
-  # new build isn't misread as a drop (that false-negative kill-looped every
-  # Opus footer once the model line became parseable again).
-  if grep -qE "Remote Control active|/rc active" <<< "$footer"; then
+  # Three footer formats / states to account for:
+  #   * old builds:     "Remote Control active"
+  #   * current builds: "/rc active" (healthy)  |  "/rc failed" (drop)
+  #   * width-CLIPPED:  claude right-aligns the "/rc active" indicator, and a
+  #     few-column overshoot (or a long branch name) truncates it to a bare
+  #     "/rc" — or a partial "/rc acti". The strict "/rc active" match misread
+  #     these HEALTHY panes as drops and kill-looped them (algo-trading at 80c,
+  #     project_a at 120c — 2026-06-20).
+  # So treat as healthy: "Remote Control active", any "/rc a"(ctive, incl.
+  # partial truncation), or a bare "/rc" at end-of-line (fully clipped). A
+  # "/rc f"(ailed) or "/rc c"(onnecting) still falls through to a drop so
+  # genuine failures recover. Trade-off: a "/rc failed" itself clipped to a
+  # bare "/rc" reads as healthy — deliberately favoring "don't kill a
+  # maybe-healthy pane" over "force-recover a maybe-failed one".
+  if grep -qE "Remote Control active|/rc a|/rc[[:space:]]*$" <<< "$footer"; then
     if [[ "$cur" -gt 0 ]]; then
       log "$pane: RC recovered (was at miss=$cur)"
     fi
