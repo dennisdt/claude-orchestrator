@@ -2,15 +2,16 @@
 # claude-state — tiny session-state tracker for claude-orchestrator.
 #
 # Maintains a TSV at ~/.claude-orchestrator/sessions.txt with one
-# <name><TAB><path> line per project window the orchestrator has spawned.
-# Lets the orchestrator restore project windows after a reboot or
-# tmux kill-server.
+# <name><TAB><path><TAB><kind> line per project window the orchestrator has
+# spawned. <kind> is "claude" (default, back-compat with 2-column lines) or
+# "pi". Lets the orchestrator restore project windows after a reboot or
+# tmux kill-server, using the right revive wrapper for each.
 #
 # Usage:
-#   claude-state add <name> <path>    Record a spawned session (upsert)
-#   claude-state remove <name>        Remove a killed session
-#   claude-state list                 Print all recorded sessions
-#   claude-state missing              Print sessions in state but NOT in tmux
+#   claude-state add <name> <path> [kind]   Record a spawned session (upsert)
+#   claude-state remove <name>              Remove a killed session
+#   claude-state list                       Print all recorded sessions
+#   claude-state missing                    Print sessions in state but NOT in tmux
 #
 # The "work" tmux session and the orchestrator window are intentionally
 # untracked — only project windows belong in state.
@@ -26,10 +27,10 @@ touch "$STATE_FILE"
 usage() {
   cat <<'EOF'
 Usage:
-  claude-state add <name> <path>    Record a spawned session (upsert)
-  claude-state remove <name>        Remove a killed session
-  claude-state list                 Print all recorded sessions
-  claude-state missing              Print sessions in state but NOT in tmux
+  claude-state add <name> <path> [kind]   Record a spawned session (upsert)
+  claude-state remove <name>              Remove a killed session
+  claude-state list                       Print all recorded sessions
+  claude-state missing                    Print sessions in state but NOT in tmux
 EOF
 }
 
@@ -38,14 +39,15 @@ cmd="${1:-}"
 case "$cmd" in
   add)
     if [[ $# -lt 3 ]]; then
-      echo "usage: claude-state add <name> <path>" >&2
+      echo "usage: claude-state add <name> <path> [kind]" >&2
       exit 2
     fi
     name="$2"
     path="$3"
+    kind="${4:-claude}"
     tmp="$(mktemp)"
     awk -v n="$name" -F'\t' '$1 != n' "$STATE_FILE" > "$tmp"
-    printf '%s\t%s\n' "$name" "$path" >> "$tmp"
+    printf '%s\t%s\t%s\n' "$name" "$path" "$kind" >> "$tmp"
     mv "$tmp" "$STATE_FILE"
     ;;
   remove|rm)
@@ -68,10 +70,11 @@ case "$cmd" in
       exit 0
     fi
     live="$(tmux list-windows -t work -F '#{window_name}' | sort -u)"
-    while IFS=$'\t' read -r name path; do
+    while IFS=$'\t' read -r name path kind; do
       [[ -z "$name" ]] && continue
+      kind="${kind:-claude}"
       if ! printf '%s\n' "$live" | grep -qx "$name"; then
-        printf '%s\t%s\n' "$name" "$path"
+        printf '%s\t%s\t%s\n' "$name" "$path" "$kind"
       fi
     done < "$STATE_FILE"
     ;;

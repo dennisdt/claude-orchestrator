@@ -20,6 +20,13 @@ set -u
 
 FLAGS=(--dangerously-skip-permissions --remote-control)
 
+# Opt-in per-launch extra flags (e.g. --chrome). One-shot: pass as a command
+# prefix like CLAUDE_REVIVE_FRESH, not an exported var. Word-split intentionally.
+if [[ -n "${CLAUDE_REVIVE_EXTRA_FLAGS:-}" ]]; then
+  read -ra extra_flags <<< "$CLAUDE_REVIVE_EXTRA_FLAGS"
+  FLAGS+=("${extra_flags[@]}")
+fi
+
 # Claude encodes project dirs by replacing /, ., and _ with - (so
 # /Volumes/SAMSUNG_SSD_990_PRO/.foo becomes -Volumes-SAMSUNG-SSD-990-PRO--foo
 # under ~/.claude/projects). Resolve symlinks first (pwd -P) so a window

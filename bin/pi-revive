@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# pi-revive — auto-respawning `pi` wrapper, mirrors claude-revive.
+#
+# Unlike claude-revive, this does not detect prior on-disk history before
+# the first launch (pi's session-dir path encoding isn't replicated here) —
+# first launch is always a fresh `pi` session. Only respawns after a crash
+# use --continue, which preserves the conversation that was running in this
+# window right before the crash.
+#
+# remote-pi's agent network/relay join (`/remote-pi`) is a TUI slash command,
+# not a CLI flag, so it must be sent after each launch — see CLAUDE.md.
+
+set -u
+
+encoded_cwd="$(pwd -P | sed 's|[/._]|-|g')"
+LOG_DIR="$HOME/.claude-orchestrator/logs"
+LOG_FILE="$LOG_DIR/pi-revive-$encoded_cwd.log"
+mkdir -p "$LOG_DIR" 2>/dev/null
+
+revive_log() {
+  printf '[pi-revive] %s\n' "$*"
+  printf '[%s] [pi-revive] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE" 2>/dev/null
+}
+
+trap 'echo ""; revive_log "Loop stopped."; exit 0' INT TERM
+
+first=1
+while true; do
+  if [[ "$first" -eq 1 ]]; then
+    pi
+    first=0
+  else
+    pi --continue
+  fi
+  status=$?
+
+  echo ""
+  revive_log "pi exited (status $status)."
+  revive_log "Restarting in 5s. Ctrl+C to stop the loop."
+  sleep 5 || break
+done

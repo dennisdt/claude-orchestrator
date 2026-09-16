@@ -34,6 +34,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 REVIVE="$REPO/bin/claude-revive"
+PI_REVIVE="$REPO/bin/pi-revive"
 
 maybe_attach() {
   [[ "$NO_ATTACH" -eq 1 ]] && return 0
@@ -46,16 +47,23 @@ maybe_attach() {
 # check skips state entries whose project directory has been removed; those
 # get surfaced by the orchestrator's own claude-state missing check instead.
 restore_missing() {
-  local name path
-  while IFS=$'\t' read -r name path; do
+  local name path kind revive
+  while IFS=$'\t' read -r name path kind; do
     [[ -z "$name" ]] && continue
     if [[ ! -d "$path" ]]; then
       printf '[start-work] WARN %s -> %s: dir missing, skipping\n' "$name" "$path" >&2
       continue
     fi
-    printf '[start-work] restoring %s -> %s\n' "$name" "$path"
+    kind="${kind:-claude}"
+    revive="$REVIVE"
+    [[ "$kind" == "pi" ]] && revive="$PI_REVIVE"
+    printf '[start-work] restoring %s -> %s (%s)\n' "$name" "$path" "$kind"
     tmux new-window -t work -c "$path" -n "$name"
-    tmux send-keys -t "work:$name" "$REVIVE" Enter
+    tmux send-keys -t "work:$name" "$revive" Enter
+    if [[ "$kind" == "pi" ]]; then
+      sleep 3
+      tmux send-keys -t "work:$name" '/remote-pi' Enter
+    fi
   done < <("$REPO/bin/claude-state" missing)
 }
 
