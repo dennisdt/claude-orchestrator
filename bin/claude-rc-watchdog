@@ -10,10 +10,14 @@
 #
 # This watchdog polls every pane in a tmux session, looks at ONLY the
 # footer area (last 3 lines of visible content — never scrollback), and
-# when the RC indicator is missing for THRESHOLD consecutive checks while
-# claude's UI is still rendering, sends SIGTERM to the claude process on
-# that pane's tty. claude-revive's existing respawn loop then relaunches
-# with `--continue`, which re-registers with the relay.
+# when the footer shows an explicit negative RC indicator (e.g. "/rc failed")
+# for THRESHOLD consecutive checks while claude's UI is still rendering,
+# sends SIGTERM to the claude process on that pane's tty. claude-revive's
+# existing respawn loop then relaunches with `--continue`, which re-registers
+# with the relay. As of claude 2.1.273 a healthy connection renders NO RC
+# text at all (see the polarity-flip comment in check_pane), so a missing
+# indicator is the normal healthy case, not a drop — only a matched negative
+# string counts as a miss.
 #
 # Design choices:
 #   * Footer-only capture (`tail -3`) — avoids matching arbitrary
@@ -204,33 +208,43 @@ check_pane() {
   fi
   footer=$(tail -n +"$model_lineno" <<< "$pane_buf")
 
-  # Footer present AND the RC indicator appears in the footer block → healthy.
-  # Three footer formats / states to account for:
-  #   * old builds:     "Remote Control active"
-  #   * current builds: "/rc active" (healthy)  |  "/rc failed" (drop)
-  #   * width-CLIPPED:  claude right-aligns the "/rc active" indicator, and a
-  #     few-column overshoot (or a long branch name) truncates it to a bare
-  #     "/rc" — or a partial "/rc acti". The strict "/rc active" match misread
-  #     these HEALTHY panes as drops and kill-looped them (algo-trading at 80c,
-  #     project_a at 120c — 2026-06-20).
-  # So treat as healthy: "Remote Control active", any "/rc a"(ctive, incl.
-  # partial truncation), or a bare "/rc" at end-of-line (fully clipped). A
-  # "/rc f"(ailed) or "/rc c"(onnecting) still falls through to a drop so
-  # genuine failures recover. Trade-off: a "/rc failed" itself clipped to a
-  # bare "/rc" reads as healthy — deliberately favoring "don't kill a
-  # maybe-healthy pane" over "force-recover a maybe-failed one".
-  if grep -qE "Remote Control active|/rc a|/rc[[:space:]]*$" <<< "$footer"; then
+  # POLARITY FLIPPED 2026-09-15 (claude 2.1.273): builds through 2.1.257 always
+  # rendered a positive confirmation ("Remote Control active" / "/rc active",
+  # possibly width-clipped to a bare "/rc") whenever RC was healthy, so the
+  # watchdog required a positive match and treated anything else as a drop.
+  # 2.1.273 stopped rendering ANY rc text for a healthy connection — verified
+  # by capturing full raw escape sequences (`capture-pane -e`) on two panes,
+  # one resized to 220 cols, both confirmed live via the relay the whole time:
+  # zero "/rc" or "Remote Control" substring anywhere in the footer at any
+  # width. Requiring a positive match now false-positives on every healthy
+  # pane, every poll — that's what caused the 2026-09-15 kill loop (orchestrator
+  # + agentic-kalshi SIGTERMed every ~3 min for 45+ min, churning new relay
+  # session IDs and showing as "archived" sessions in the mobile app).
+  #
+  # No positive indicator has been observed in 2.1.273 under any known-healthy
+  # condition, so requiring one is no longer viable. What's NOT confirmed:
+  # whether 2.1.273 still renders a NEGATIVE indicator ("/rc failed", "/rc
+  # connecting") on a genuine drop — no real drop has been observed on this
+  # build to check. Assume it does (these strings predate this build and are
+  # actionable warnings a human would want visible, unlike a redundant
+  # all-clear) until proven otherwise. So: absence of RC text = healthy
+  # (the new normal); an explicit negative string = drop. This trades "might
+  # miss a real drop if 2.1.273 also dropped the negative string" for "stop
+  # guaranteed-false-positive killing every healthy pane" — the correct trade
+  # given the former is unconfirmed and the latter was actively happening.
+  # If a genuine drop is ever caught red-handed, capture its exact footer text
+  # (`tmux capture-pane -p -e`) and fold the real string in here.
+  if grep -qE "/rc f|/rc c|Remote Control (failed|disconnected|lost)" <<< "$footer"; then
+    cur=$((cur + 1))
+    miss_set "$pane" "$cur"
+    log "$pane: RC missing (miss $cur/$THRESHOLD)"
+  else
     if [[ "$cur" -gt 0 ]]; then
       log "$pane: RC recovered (was at miss=$cur)"
     fi
     miss_set "$pane" 0
     return 0
   fi
-
-  # Footer present, RC indicator missing → confirmed drop.
-  cur=$((cur + 1))
-  miss_set "$pane" "$cur"
-  log "$pane: RC missing (miss $cur/$THRESHOLD)"
 
   if [[ $cur -ge $THRESHOLD ]]; then
     fire_restart "$pane"

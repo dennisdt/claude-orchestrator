@@ -46,7 +46,7 @@ install_label() {
   fi
 
   say "Rendering $label with REPO=$REPO"
-  sed "s|__REPO__|$REPO|g" "$template" > "$plist"
+  sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" "$template" > "$plist"
 
   say "Reloading $label..."
   bootout_label "$label"
