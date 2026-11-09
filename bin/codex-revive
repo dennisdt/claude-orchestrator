@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# codex-revive — auto-respawning Codex CLI wrapper, mirrors claude-revive.
+#
+# Codex's remote access works differently from Claude's: instead of a
+# per-session --remote-control flag, one app-server daemon per machine holds
+# the relay connection to the ChatGPT app (`codex remote-control start`,
+# paired once with `codex remote-control pair`). Every window attaches its
+# TUI to that daemon with `--remote unix://`, so its threads live on the
+# daemon and show up in the ChatGPT app.
+#
+# Always launches with `resume --last`, which is scoped to the current
+# directory: it continues the newest thread for this cwd, or starts a fresh
+# one when there is none. On any exit, respawns after a 5s grace window.
+# Press Ctrl+C during the grace window to stop the loop.
+#
+# First launch in a directory Codex hasn't trusted yet stops at a "Trust this
+# folder?" prompt — the orchestrator answers it (see CLAUDE.md).
+
+set -u
+
+FLAGS=(--remote unix:// --dangerously-bypass-approvals-and-sandbox)
+
+# Opt-in per-launch extra flags (e.g. -m <model>). One-shot: pass as a
+# command prefix, not an exported var. Word-split intentionally.
+if [[ -n "${CODEX_REVIVE_EXTRA_FLAGS:-}" ]]; then
+  read -ra extra_flags <<< "$CODEX_REVIVE_EXTRA_FLAGS"
+  FLAGS+=("${extra_flags[@]}")
+fi
+
+encoded_cwd="$(pwd -P | sed 's|[/._]|-|g')"
+LOG_DIR="$HOME/.claude-orchestrator/logs"
+LOG_FILE="$LOG_DIR/codex-revive-$encoded_cwd.log"
+mkdir -p "$LOG_DIR" 2>/dev/null
+
+revive_log() {
+  printf '[codex-revive] %s\n' "$*"
+  printf '[%s] [codex-revive] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE" 2>/dev/null
+}
+
+# Idempotent: prints alreadyRunning when the daemon is up, (re)starts it
+# otherwise — so a window spawned after a reboot brings the relay back too.
+ensure_daemon() {
+  if ! codex remote-control start --json >/dev/null 2>&1; then
+    revive_log "WARN: 'codex remote-control start' failed — session will run but may not reach the ChatGPT app."
+  fi
+}
+
+trap 'echo ""; revive_log "Loop stopped."; exit 0' INT TERM
+
+if [[ "${CODEX_REVIVE_FRESH:-0}" == "1" ]]; then
+  # Opt-in: force a brand-new thread on the first launch even when this
+  # directory has history. Respawns resume THAT new thread.
+  revive_log "CODEX_REVIVE_FRESH=1 — starting a brand-new thread for $(pwd)."
+  first_fresh=1
+else
+  revive_log "Starting Codex for $(pwd) (resumes the latest thread here, if any)."
+  first_fresh=0
+fi
+
+while true; do
+  ensure_daemon
+  if [[ "$first_fresh" -eq 1 ]]; then
+    codex "${FLAGS[@]}"
+    first_fresh=0
+  else
+    codex "${FLAGS[@]}" resume --last
+  fi
+  status=$?
+
+  echo ""
+  revive_log "Codex exited (status $status)."
+  revive_log "Restarting in 5s. Ctrl+C to stop the loop."
+  sleep 5 || break
+done

@@ -3,8 +3,8 @@
 #
 # Maintains a TSV at ~/.claude-orchestrator/sessions.txt with one
 # <name><TAB><path><TAB><kind> line per project window the orchestrator has
-# spawned. <kind> is "claude" (default, back-compat with 2-column lines) or
-# "pi". Lets the orchestrator restore project windows after a reboot or
+# spawned. <kind> is "claude" (default, back-compat with 2-column lines),
+# "codex", or "pi". Lets the orchestrator restore project windows after a reboot or
 # tmux kill-server, using the right revive wrapper for each.
 #
 # Usage:

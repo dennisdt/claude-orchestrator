@@ -35,6 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 REVIVE="$REPO/bin/claude-revive"
 PI_REVIVE="$REPO/bin/pi-revive"
+CODEX_REVIVE="$REPO/bin/codex-revive"
 
 maybe_attach() {
   [[ "$NO_ATTACH" -eq 1 ]] && return 0
@@ -57,6 +58,7 @@ restore_missing() {
     kind="${kind:-claude}"
     revive="$REVIVE"
     [[ "$kind" == "pi" ]] && revive="$PI_REVIVE"
+    [[ "$kind" == "codex" ]] && revive="$CODEX_REVIVE"
     printf '[start-work] restoring %s -> %s (%s)\n' "$name" "$path" "$kind"
     tmux new-window -t work -c "$path" -n "$name"
     tmux send-keys -t "work:$name" "$revive" Enter
